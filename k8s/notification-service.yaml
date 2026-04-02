@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: sparklex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+    spec:
+      containers:
+      - name: notification-service
+        image: sparklex-notification-service:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql+asyncpg://sparklex:$(POSTGRES_PASSWORD)@postgres:5432/sparklex_notifications"
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis:6379/3"
+        - name: RABBITMQ_URL
+          value: "amqp://sparklex:$(RABBITMQ_PASSWORD)@rabbitmq:5672/sparklex_vhost"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: JWT_SECRET_KEY
+        - name: ALGORITHM
+          value: "HS256"
+        - name: ACCESS_TOKEN_EXPIRE_MINUTES
+          value: "30"
+        - name: REFRESH_TOKEN_EXPIRE_DAYS
+          value: "7"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: POSTGRES_PASSWORD
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: REDIS_PASSWORD
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: RABBITMQ_PASSWORD
+        - name: AUTH_SERVICE_URL
+          value: "http://auth-service:8000"
+        - name: SMTP_HOST
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: SMTP_HOST
+        - name: SMTP_PORT
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: SMTP_PORT
+        - name: SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: SMTP_USER
+        - name: SMTP_PASS
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: SMTP_PASS
+        - name: SMTP_FROM
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: SMTP_FROM
+        - name: ENVIRONMENT
+          value: "production"
+        command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: sparklex
+spec:
+  selector:
+    app: notification-service
+  ports:
+  - port: 8000
+    targetPort: 8000

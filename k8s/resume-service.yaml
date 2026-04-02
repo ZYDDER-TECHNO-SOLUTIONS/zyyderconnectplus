@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resume-service
+  namespace: sparklex
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: resume-service
+  template:
+    metadata:
+      labels:
+        app: resume-service
+    spec:
+      containers:
+      - name: resume-service
+        image: sparklex-resume-service:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql+asyncpg://sparklex:$(POSTGRES_PASSWORD)@postgres:5432/sparklex_resumes"
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis:6379/2"
+        - name: RABBITMQ_URL
+          value: "amqp://sparklex:$(RABBITMQ_PASSWORD)@rabbitmq:5672/sparklex_vhost"
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: JWT_SECRET_KEY
+        - name: ALGORITHM
+          value: "HS256"
+        - name: ACCESS_TOKEN_EXPIRE_MINUTES
+          value: "30"
+        - name: REFRESH_TOKEN_EXPIRE_DAYS
+          value: "7"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: POSTGRES_PASSWORD
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: REDIS_PASSWORD
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: RABBITMQ_PASSWORD
+        - name: MONGO_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: MONGO_PASSWORD
+        - name: AUTH_SERVICE_URL
+          value: "http://auth-service:8000"
+        - name: JOB_SERVICE_URL
+          value: "http://job-service:8000"
+        - name: MONGO_URL
+          value: "mongodb://sparklex:$(MONGO_PASSWORD)@mongodb:27017"
+        - name: MONGO_DB
+          value: "sparklex_resumes"
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: sparklex-secrets
+              key: OPENAI_API_KEY
+        - name: ENVIRONMENT
+          value: "production"
+        command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resume-service
+  namespace: sparklex
+spec:
+  selector:
+    app: resume-service
+  ports:
+  - port: 8000
+    targetPort: 8000

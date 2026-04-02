@@ -1,0 +1,291 @@
+# version removed - obsolete in modern Docker Compose
+
+services:
+  # ─── Infrastructure ───────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: sparklex-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sparklex
+      POSTGRES_PASSWORD: sparklex_secret
+      POSTGRES_MULTIPLE_DATABASES: sparklex_auth,sparklex_jobs,sparklex_resumes,sparklex_notifications
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init-multiple-dbs.sh:/docker-entrypoint-initdb.d/init-multiple-dbs.sh
+    ports:
+      - "5433:5432"
+    networks:
+      - sparklex-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sparklex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: sparklex-redis
+    restart: unless-stopped
+    command: redis-server --requirepass sparklex_redis_secret --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - sparklex-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "sparklex_redis_secret", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: sparklex-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: sparklex
+      RABBITMQ_DEFAULT_PASS: sparklex_rabbit_secret
+      RABBITMQ_DEFAULT_VHOST: sparklex_vhost
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    networks:
+      - sparklex-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  mongodb:
+    image: mongo:7-jammy
+    container_name: sparklex-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: sparklex
+      MONGO_INITDB_ROOT_PASSWORD: sparklex_mongo_secret
+    volumes:
+      - mongodb_data:/data/db
+    ports:
+      - "27018:27017"
+    networks:
+      - sparklex-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1}).ok", "-u", "sparklex", "-p", "sparklex_mongo_secret"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ─── Backend Microservices ─────────────────────────────────────────────────
+  auth-service:
+    build:
+      context: ./backend/auth-service
+      dockerfile: Dockerfile
+    container_name: sparklex-auth
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sparklex:sparklex_secret@postgres:5432/sparklex_auth
+      REDIS_URL: redis://:sparklex_redis_secret@redis:6379/0
+      RABBITMQ_URL: amqp://sparklex:sparklex_rabbit_secret@rabbitmq:5672/sparklex_vhost
+      SECRET_KEY: sparklex_jwt_secret_key_change_in_production_minimum_32_chars
+      ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+      REFRESH_TOKEN_EXPIRE_DAYS: 7
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      SMTP_FROM: ${SMTP_FROM}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      ENVIRONMENT: development
+    ports:
+      - "8081:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - sparklex-net
+    volumes:
+      - ./backend/auth-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  job-service:
+    build:
+      context: ./backend/job-service
+      dockerfile: Dockerfile
+    container_name: sparklex-jobs
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sparklex:sparklex_secret@postgres:5432/sparklex_jobs
+      REDIS_URL: redis://:sparklex_redis_secret@redis:6379/1
+      RABBITMQ_URL: amqp://sparklex:sparklex_rabbit_secret@rabbitmq:5672/sparklex_vhost
+      AUTH_SERVICE_URL: http://auth-service:8000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ENVIRONMENT: development
+    ports:
+      - "8082:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - sparklex-net
+    volumes:
+      - ./backend/job-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  resume-service:
+    build:
+      context: ./backend/resume-service
+      dockerfile: Dockerfile
+    container_name: sparklex-resumes
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sparklex:sparklex_secret@postgres:5432/sparklex_resumes
+      REDIS_URL: redis://:sparklex_redis_secret@redis:6379/2
+      RABBITMQ_URL: amqp://sparklex:sparklex_rabbit_secret@rabbitmq:5672/sparklex_vhost
+      AUTH_SERVICE_URL: http://auth-service:8000
+      JOB_SERVICE_URL: http://job-service:8000
+      MONGO_URL: mongodb://sparklex:sparklex_mongo_secret@mongodb:27017
+      MONGO_DB: sparklex_resumes
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ENVIRONMENT: development
+    ports:
+      - "8083:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - sparklex-net
+    volumes:
+      - ./backend/resume-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  notification-service:
+    build:
+      context: ./backend/notification-service
+      dockerfile: Dockerfile
+    container_name: sparklex-notifications
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://sparklex:sparklex_secret@postgres:5432/sparklex_notifications
+      REDIS_URL: redis://:sparklex_redis_secret@redis:6379/3
+      RABBITMQ_URL: amqp://sparklex:sparklex_rabbit_secret@rabbitmq:5672/sparklex_vhost
+      AUTH_SERVICE_URL: http://auth-service:8000
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      FROM_EMAIL: noreply@sparklex.io
+      ENVIRONMENT: development
+    ports:
+      - "8084:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - sparklex-net
+    volumes:
+      - ./backend/notification-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ─── Frontend ──────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: sparklex-frontend
+    restart: unless-stopped
+    environment:
+      VITE_AUTH_API_URL: http://localhost:8081
+      VITE_JOB_API_URL: http://localhost:8082
+      VITE_RESUME_API_URL: http://localhost:8083
+      VITE_NOTIFICATION_API_URL: http://localhost:8084
+      VITE_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - sparklex-net
+
+  # ─── API Gateway / Nginx ───────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: sparklex-nginx
+    restart: unless-stopped
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - auth-service
+      - job-service
+      - resume-service
+      - notification-service
+      - frontend
+    networks:
+      - sparklex-net
+
+  # ─── Dev Tools ─────────────────────────────────────────────────────────────
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: sparklex-mailhog
+    ports:
+      - "1026:1025"
+      - "8126:8025"
+    networks:
+      - sparklex-net
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  mongodb_data:
+
+networks:
+  sparklex-net:
+    driver: bridge
